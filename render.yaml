@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: sync-audio-hub
+    env: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: node server.js
+    autoDeploy: true
+    healthCheckPath: /
+
+

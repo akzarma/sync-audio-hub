@@ -46,6 +46,12 @@ docker run -p 8080:8080 sync-audio-hub
 
 Open http://localhost:8080
 
+### Render (free, easy)
+1) Go to: https://dashboard.render.com/iac
+2) New Blueprint → connect your GitHub repo `akzarma/sync-audio-hub`
+3) Select `render.yaml`
+4) Click Apply. Render will provision on the free plan and give you a URL. No Docker needed.
+
 ## ngrok (optional, for local public link)
 
 - Install: brew install ngrok
