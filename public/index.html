@@ -21,6 +21,8 @@
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     code { background: rgba(127,127,127,0.2); padding: 2px 6px; border-radius: 6px; }
     .gate { margin-top: 10px; }
+    .share { margin-top: 6px; }
+    .share code { font-weight: 600; }
     .tunnel { margin-top: 8px; display: none; }
   </style>
   <script src="/socket.io/socket.io.js"></script>
@@ -155,6 +157,18 @@
       connect();
       startDriftCorrection();
 
+      // Show a directly shareable URL (works on Fly and anywhere)
+      const shareEl = document.getElementById('shareUrl');
+      shareEl.textContent = location.origin + location.pathname;
+
+      // Hide LAN list if running on a public host (e.g., Fly)
+      const host = location.hostname;
+      const isPrivate = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host);
+      if (!isPrivate) {
+        const lanWrap = document.getElementById('lanWrap');
+        if (lanWrap) lanWrap.style.display = 'none';
+      }
+
       fetch('/lan').then(r=>r.json()).then(({ addresses, port }) => {
         const list = document.getElementById('lanAddrs');
         list.innerHTML = '';
@@ -254,8 +268,11 @@
     <header>
       <h2>Sync Audio Network</h2>
       <div class="lan">
-        Access from these LAN URLs:
-        <div id="lanAddrs" class="small"></div>
+        <div class="share small">Share this page: <code id="shareUrl">…</code></div>
+        <div id="lanWrap">
+          Access from these LAN URLs:
+          <div id="lanAddrs" class="small"></div>
+        </div>
       </div>
     </header>
 
