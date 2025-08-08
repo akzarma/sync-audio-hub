@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sync Audio Network</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
+    .container { max-width: 920px; margin: 0 auto; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .lan { font-size: 14px; opacity: 0.85; }
+    .dropzone { margin-top: 16px; border: 2px dashed #888; border-radius: 12px; padding: 40px; text-align: center; }
+    .dropzone.dragover { border-color: #2979ff; background: rgba(41,121,255,0.08); }
+    .controls { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #666; background: #222; color: #fff; cursor: pointer; }
+    button:hover { filter: brightness(1.15); }
+    audio { width: 100%; margin-top: 12px; }
+    .small { font-size: 12px; opacity: 0.8; }
+    .hidden { display: none; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    code { background: rgba(127,127,127,0.2); padding: 2px 6px; border-radius: 6px; }
+    .gate { margin-top: 10px; }
+    .tunnel { margin-top: 8px; }
+  </style>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // Simple NTP-like clock sync
+    let socket;
+    let clockOffsetMs = 0; // serverTime - clientTime
+    let currentTrackUrl = null;
+    let audioEl;
+    let isReady = false;
+    let session = {
+      paused: true,
+      startAtServerMs: null,
+      startPositionMs: 0
+    };
+
+    async function syncClock(samples = 8) {
+      const offsets = [];
+      for (let i = 0; i < samples; i++) {
+        const t0 = performance.now();
+        socket.emit('clock:ping', { t0 });
+        const pong = await new Promise(resolve => {
+          const handler = (data) => {
+            socket.off('clock:pong', handler);
+            resolve(data);
+          };
+          socket.on('clock:pong', handler);
+        });
+        const t3 = performance.now();
+        const t1 = pong.tServer;
+        const t2 = (pong.echo && pong.echo.t0) || t0;
+        const rtt = t3 - t2;
+        const oneWay = rtt / 2;
+        const estimatedClientAtServerRespond = t2 + oneWay;
+        offsets.push(t1 - (Date.now() - (performance.now() - estimatedClientAtServerRespond)));
+        await new Promise(r => setTimeout(r, 60));
+      }
+      offsets.sort((a,b)=>a-b);
+      const mid = Math.floor(offsets.length / 2);
+      clockOffsetMs = offsets.length % 2 ? offsets[mid] : (offsets[mid-1]+offsets[mid])/2;
+      document.getElementById('clockOffset').textContent = Math.round(clockOffsetMs) + ' ms';
+    }
+
+    function serverNow() { return Date.now() + clockOffsetMs; }
+
+    function scheduleStart(startAtServerMs, startPositionMs) {
+      const whenMs = startAtServerMs - serverNow();
+      const start = () => {
+        audioEl.currentTime = startPositionMs / 1000;
+        audioEl.play();
+        session.paused = false;
+      };
+      if (whenMs <= 20) { start(); }
+      else setTimeout(start, whenMs - 15);
+    }
+
+    // Drift correction loop
+    function startDriftCorrection() {
+      const interval = 1000; // 1s
+      setInterval(() => {
+        if (!currentTrackUrl || session.paused) return;
+        const elapsedServer = serverNow() - session.startAtServerMs;
+        const targetSec = (session.startPositionMs + elapsedServer) / 1000;
+        const actual = audioEl.currentTime;
+        const drift = targetSec - actual;
+        // If drift is above threshold, correct gently
+        const small = 0.015; // 15ms
+        const big = 0.25; // 250ms
+        if (Math.abs(drift) > big) {
+          audioEl.currentTime = targetSec;
+        } else if (Math.abs(drift) > small) {
+          // Slightly adjust playbackRate to catch up/slow down
+          const adjust = Math.max(0.95, Math.min(1.05, 1 + drift * 0.1));
+          audioEl.playbackRate = adjust;
+          // Reset rate after a short period
+          setTimeout(()=>{ audioEl.playbackRate = 1.0; }, 300);
+        }
+      }, interval);
+    }
+
+    function connect() {
+      socket = io();
+      socket.on('welcome', async (data) => {
+        await syncClock(10);
+        if (data && data.state) {
+          currentTrackUrl = data.state.currentTrackUrl;
+          session.startAtServerMs = data.state.sessionStartAtServerMs;
+          session.paused = data.state.sessionPaused;
+          session.startPositionMs = data.state.sessionPauseAtPositionMs || 0;
+          if (currentTrackUrl) {
+            setTrack(currentTrackUrl);
+            if (!session.paused && session.startAtServerMs) {
+              scheduleStart(session.startAtServerMs, session.startPositionMs);
+            }
+          }
+        }
+      });
+      socket.on('track:updated', ({ currentTrackUrl: url, sessionPaused }) => {
+        currentTrackUrl = url;
+        setTrack(url);
+        if (sessionPaused) audioEl.pause();
+      });
+      socket.on('play', ({ startAtServerMs, startPositionMs }) => {
+        session.startAtServerMs = startAtServerMs;
+        session.startPositionMs = startPositionMs || 0;
+        session.paused = false;
+        scheduleStart(startAtServerMs, session.startPositionMs);
+      });
+      socket.on('pause', ({ positionMs }) => {
+        session.paused = true;
+        session.startPositionMs = positionMs;
+        audioEl.pause();
+      });
+      socket.on('seek', ({ positionMs, startAtServerMs }) => {
+        session.startPositionMs = positionMs;
+        session.startAtServerMs = startAtServerMs;
+        session.paused = false;
+        scheduleStart(startAtServerMs, positionMs);
+      });
+    }
+
+    function setTrack(url) {
+      const src = document.getElementById('audio-source');
+      src.src = url;
+      audioEl.load();
+    }
+
+    function init() {
+      audioEl = document.getElementById('audio');
+      connect();
+      startDriftCorrection();
+
+      fetch('/lan').then(r=>r.json()).then(({ addresses, port }) => {
+        const list = document.getElementById('lanAddrs');
+        list.innerHTML = '';
+        addresses.forEach(a => {
+          const url = `http://${a}:${port}`;
+          const li = document.createElement('div');
+          li.innerHTML = `<code>${url}</code>`;
+          list.appendChild(li);
+        });
+      }).catch(()=>{});
+
+      // fetch ngrok tunnel URL
+      const refreshTunnel = () => fetch('/tunnel').then(r=>r.json()).then(({ url }) => {
+        const el = document.getElementById('ngrokUrl');
+        el.textContent = url ? url : 'not active';
+      }).catch(()=>{});
+      refreshTunnel();
+      setInterval(refreshTunnel, 5000);
+
+      const dz = document.getElementById('dropzone');
+      const fileInput = document.getElementById('fileInput');
+      dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+      dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+      dz.addEventListener('drop', (e) => {
+        e.preventDefault(); dz.classList.remove('dragover');
+        const file = e.dataTransfer.files[0];
+        if (file) uploadFile(file);
+      });
+      dz.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        if (file) uploadFile(file);
+      });
+
+      audioEl.addEventListener('play', () => {
+        if (session.paused) return; // ignore local plays when session says paused
+      });
+
+      document.getElementById('btnPlay').addEventListener('click', async () => {
+        if (!currentTrackUrl) return;
+        await syncClock(4);
+        const startAt = Date.now() + clockOffsetMs + 800; // 0.8s in future
+        const positionMs = session.paused ? session.startPositionMs : Math.max(0, (serverNow() - session.startAtServerMs) + session.startPositionMs);
+        socket.emit('play', { startAtServerMs: startAt, startPositionMs: positionMs });
+      });
+      document.getElementById('btnPause').addEventListener('click', () => {
+        if (!currentTrackUrl) return;
+        const positionMs = Math.floor(audioEl.currentTime * 1000);
+        socket.emit('pause', { positionMs });
+      });
+      document.getElementById('btnSeek').addEventListener('click', async () => {
+        if (!currentTrackUrl) return;
+        const sec = parseFloat(prompt('Seek to time (seconds):', '0')) || 0;
+        await syncClock(4);
+        const startAt = Date.now() + clockOffsetMs + 800;
+        socket.emit('seek', { positionMs: Math.max(0, sec * 1000), startAtServerMs: startAt });
+      });
+
+      // Audio gate: each client must interact once due to browser autoplay policy
+      const gateBtn = document.getElementById('btnEnable');
+      gateBtn.addEventListener('click', async () => {
+        try {
+          audioEl.muted = true;
+          await audioEl.play();
+          audioEl.pause();
+          audioEl.currentTime = 0;
+          audioEl.muted = false;
+          gateBtn.textContent = 'Audio Enabled';
+          gateBtn.disabled = true;
+        } catch (e) {
+          alert('Please allow audio playback in your browser settings and try again.');
+        }
+      });
+    }
+
+    function uploadFile(file) {
+      if (!file.type.startsWith('audio/')) { alert('Please drop an audio file'); return; }
+      const fd = new FormData();
+      fd.append('audio', file);
+      fetch('/upload', { method: 'POST', body: fd }).then(r => r.json()).then(({ url }) => {
+        currentTrackUrl = url;
+        document.getElementById('current').textContent = url;
+        setTrack(url);
+        socket.emit('track:set', { url });
+      }).catch(err => alert('Upload failed: ' + err.message));
+    }
+
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h2>Sync Audio Network</h2>
+      <div class="lan">
+        Access from these LAN URLs:
+        <div id="lanAddrs" class="small"></div>
+      </div>
+    </header>
+
+    <div class="row small">Clock offset: <span id="clockOffset">…</span></div>
+    <div class="row small tunnel">Public (ngrok): <code id="ngrokUrl">…</code></div>
+
+    <div id="dropzone" class="dropzone">
+      <div>Drop an audio file here or click to choose</div>
+      <input type="file" id="fileInput" accept="audio/*" class="hidden" />
+    </div>
+
+    <div class="row small">Current track: <code id="current">none</code></div>
+    <div class="controls">
+      <button id="btnPlay">Play</button>
+      <button id="btnPause">Pause</button>
+      <button id="btnSeek">Seek…</button>
+    </div>
+    <div class="gate">
+      <button id="btnEnable">Enable Audio on this device</button>
+      <span class="small">Required once per device due to autoplay policies.</span>
+    </div>
+    <audio id="audio" controls crossorigin="anonymous">
+      <source id="audio-source" src="" />
+      Your browser does not support the audio element.
+    </audio>
+  </div>
+</body>
+</html>
+
+
