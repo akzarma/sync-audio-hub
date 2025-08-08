@@ -21,7 +21,7 @@
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     code { background: rgba(127,127,127,0.2); padding: 2px 6px; border-radius: 6px; }
     .gate { margin-top: 10px; }
-    .tunnel { margin-top: 8px; }
+    .tunnel { margin-top: 8px; display: none; }
   </style>
   <script src="/socket.io/socket.io.js"></script>
   <script>
@@ -102,7 +102,9 @@
     }
 
     function connect() {
-      socket = io();
+      const roomMatch = location.pathname.match(/\/r\/([^/]+)/);
+      const roomId = roomMatch ? roomMatch[1] : 'default';
+      socket = io({ query: { room: roomId } });
       socket.on('welcome', async (data) => {
         await syncClock(10);
         if (data && data.state) {
@@ -156,8 +158,10 @@
       fetch('/lan').then(r=>r.json()).then(({ addresses, port }) => {
         const list = document.getElementById('lanAddrs');
         list.innerHTML = '';
+        const roomId = (new URL(location.href)).pathname.split('/').filter(Boolean).pop() || '';
+        const pathSuffix = roomId ? `/r/${roomId}` : '/';
         addresses.forEach(a => {
-          const url = `http://${a}:${port}`;
+          const url = `http://${a}:${port}${pathSuffix}`;
           const li = document.createElement('div');
           li.innerHTML = `<code>${url}</code>`;
           list.appendChild(li);
@@ -232,7 +236,9 @@
       if (!file.type.startsWith('audio/')) { alert('Please drop an audio file'); return; }
       const fd = new FormData();
       fd.append('audio', file);
-      fetch('/upload', { method: 'POST', body: fd }).then(r => r.json()).then(({ url }) => {
+      const roomMatch = location.pathname.match(/\/r\/([^/]+)/);
+      const roomId = roomMatch ? roomMatch[1] : 'default';
+      fetch(`/upload/${roomId}`, { method: 'POST', body: fd }).then(r => r.json()).then(({ url }) => {
         currentTrackUrl = url;
         document.getElementById('current').textContent = url;
         setTrack(url);

@@ -5,7 +5,6 @@ import os from 'os';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { spawn } from 'child_process';
 
 const app = express();
 const server = http.createServer(app);
@@ -23,10 +22,13 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 // Static files
 app.use(express.static(PUBLIC_DIR));
 
-// Multer storage for uploaded audio
+// Multer storage for uploaded audio (rooms)
 const storage = multer.diskStorage({
-  destination: function (_req, _file, cb) {
-    cb(null, UPLOAD_DIR);
+  destination: function (req, _file, cb) {
+    const roomId = req.params.roomId || 'default';
+    const roomDir = path.join(UPLOAD_DIR, roomId);
+    fs.mkdirSync(roomDir, { recursive: true });
+    cb(null, roomDir);
   },
   filename: function (_req, file, cb) {
     const safeName = file.originalname.replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -45,20 +47,29 @@ const upload = multer({
   }
 });
 
-// Upload endpoint
-app.post('/upload', upload.single('audio'), (req, res) => {
-  const relativePath = `/uploads/${path.basename(req.file.path)}`;
-  res.json({ ok: true, url: relativePath });
+// Upload endpoint (per room)
+app.post('/upload/:roomId', upload.single('audio'), (req, res) => {
+  const roomId = req.params.roomId;
+  const relativePath = `/uploads/${roomId}/${path.basename(req.file.path)}`;
+  res.json({ ok: true, url: relativePath, roomId });
 });
 
 // Clock sync variables
 let serverClockOffsetMs = 0; // base for drift, not currently needed but kept for future
 
-// Playback session state (shared among clients)
-let currentTrackUrl = null; // string or null
-let sessionStartAtServerMs = null; // epoch ms when the track was requested to start
-let sessionPaused = true;
-let sessionPauseAtPositionMs = 0; // position where we paused
+// Playback session state per room
+const rooms = new Map();
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      currentTrackUrl: null,
+      sessionStartAtServerMs: null,
+      sessionPaused: true,
+      sessionPauseAtPositionMs: 0,
+    });
+  }
+  return rooms.get(roomId);
+}
 
 // Helper to get LAN addresses
 function getLanAddresses() {
@@ -75,14 +86,18 @@ function getLanAddresses() {
 }
 
 io.on('connection', (socket) => {
+  const roomId = (socket.handshake.query?.room || '').toString() || 'default';
+  socket.join(roomId);
+  const state = getRoom(roomId);
   // Send initial state and time
   socket.emit('welcome', {
     serverTimeMs: Date.now(),
+    roomId,
     state: {
-      currentTrackUrl,
-      sessionStartAtServerMs,
-      sessionPaused,
-      sessionPauseAtPositionMs
+      currentTrackUrl: state.currentTrackUrl,
+      sessionStartAtServerMs: state.sessionStartAtServerMs,
+      sessionPaused: state.sessionPaused,
+      sessionPauseAtPositionMs: state.sessionPauseAtPositionMs
     }
   });
 
@@ -96,44 +111,48 @@ io.on('connection', (socket) => {
 
   // Owner (any client) sets a new track URL
   socket.on('track:set', ({ url }) => {
-    currentTrackUrl = url;
-    sessionStartAtServerMs = null;
-    sessionPaused = true;
-    sessionPauseAtPositionMs = 0;
-    io.emit('track:updated', {
-      currentTrackUrl,
-      sessionStartAtServerMs,
-      sessionPaused,
-      sessionPauseAtPositionMs
+    const s = getRoom(roomId);
+    s.currentTrackUrl = url;
+    s.sessionStartAtServerMs = null;
+    s.sessionPaused = true;
+    s.sessionPauseAtPositionMs = 0;
+    io.to(roomId).emit('track:updated', {
+      currentTrackUrl: s.currentTrackUrl,
+      sessionStartAtServerMs: s.sessionStartAtServerMs,
+      sessionPaused: s.sessionPaused,
+      sessionPauseAtPositionMs: s.sessionPauseAtPositionMs
     });
   });
 
   // Play from a given server-time start
   socket.on('play', ({ startAtServerMs, startPositionMs = 0 }) => {
-    if (!currentTrackUrl) return;
-    sessionPaused = false;
-    sessionPauseAtPositionMs = startPositionMs;
-    sessionStartAtServerMs = startAtServerMs || Date.now() + 500; // default: half-second in the future
-    io.emit('play', {
-      startAtServerMs: sessionStartAtServerMs,
-      startPositionMs: sessionPauseAtPositionMs
+    const s = getRoom(roomId);
+    if (!s.currentTrackUrl) return;
+    s.sessionPaused = false;
+    s.sessionPauseAtPositionMs = startPositionMs;
+    s.sessionStartAtServerMs = startAtServerMs || Date.now() + 500; // default: half-second future
+    io.to(roomId).emit('play', {
+      startAtServerMs: s.sessionStartAtServerMs,
+      startPositionMs: s.sessionPauseAtPositionMs
     });
   });
 
   // Pause at a given position
   socket.on('pause', ({ positionMs }) => {
-    sessionPaused = true;
-    sessionPauseAtPositionMs = positionMs;
-    io.emit('pause', { positionMs: sessionPauseAtServerMs(positionMs) });
+    const s = getRoom(roomId);
+    s.sessionPaused = true;
+    s.sessionPauseAtPositionMs = positionMs;
+    io.to(roomId).emit('pause', { positionMs: sessionPauseAtServerMs(positionMs) });
   });
 
   // Seek to a new position
   socket.on('seek', ({ positionMs, startAtServerMs }) => {
-    sessionPauseAtPositionMs = positionMs;
-    sessionStartAtServerMs = startAtServerMs || Date.now() + 500;
-    io.emit('seek', {
-      positionMs: sessionPauseAtPositionMs,
-      startAtServerMs: sessionStartAtServerMs
+    const s = getRoom(roomId);
+    s.sessionPauseAtPositionMs = positionMs;
+    s.sessionStartAtServerMs = startAtServerMs || Date.now() + 500;
+    io.to(roomId).emit('seek', {
+      positionMs: s.sessionPauseAtPositionMs,
+      startAtServerMs: s.sessionStartAtServerMs
     });
   });
 });
@@ -150,6 +169,21 @@ app.get('/lan', (_req, res) => {
   });
 });
 
+// Generate unique room id and redirect
+function generateRoomId() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+app.get('/', (req, res) => {
+  const id = generateRoomId();
+  res.redirect(`/r/${id}`);
+});
+
+// Serve index for any room path
+app.get('/r/:roomId', (req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
 server.listen(PORT, () => {
   const addrs = getLanAddresses();
   const urls = addrs.map(a => `http://${a}:${PORT}`);
@@ -159,48 +193,5 @@ server.listen(PORT, () => {
   urls.forEach((u) => console.log(`  LAN:     ${u}`));
 });
 
-// Ngrok tunnel management via CLI
-let tunnelUrl = null;
-let ngrokProcess = null;
-
-function ensureNgrokRunning() {
-  if (ngrokProcess && !ngrokProcess.killed) return;
-  const ngrokCmd = process.env.NGROK_CMD || 'ngrok_custom || ngrok';
-  const args = ['http', String(PORT)];
-  if (process.env.NGROK_AUTHTOKEN) {
-    args.unshift('--authtoken', process.env.NGROK_AUTHTOKEN);
-  }
-  try {
-    ngrokProcess = spawn(`${ngrokCmd}`, args, { stdio: 'ignore', shell: true });
-    ngrokProcess.on('exit', (code) => {
-      console.warn('ngrok process exited with code', code);
-      ngrokProcess = null;
-    });
-  } catch (err) {
-    console.warn('Failed to start ngrok:', err?.message || err);
-  }
-}
-
-async function pollNgrokApi() {
-  try {
-    const resp = await fetch('http://127.0.0.1:4040/api/tunnels');
-    if (!resp.ok) return;
-    const data = await resp.json();
-    const pub = (data.tunnels || []).find(t => t.public_url && t.proto && (t.proto === 'https' || t.proto === 'http'));
-    if (pub) {
-      tunnelUrl = pub.public_url;
-    }
-  } catch (_e) {
-    // 4040 not available yet
-  }
-}
-
-// Kick off ngrok and poll for URL periodically
-ensureNgrokRunning();
-setInterval(() => { ensureNgrokRunning(); pollNgrokApi(); }, 3000);
-
-app.get('/tunnel', (_req, res) => {
-  res.json({ url: tunnelUrl || null, tokenProvided: Boolean(process.env.NGROK_AUTHTOKEN) });
-});
 
 
