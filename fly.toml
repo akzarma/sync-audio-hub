@@ -1,22 +1,30 @@
-app = "sync-audio-hub"
-primary_region = "iad"
+# fly.toml app configuration file generated for sync-audio-hub on 2025-08-09T00:28:39+05:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'sync-audio-hub'
+primary_region = 'iad'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "8080"
+  PORT = '8080'
 
 [[services]]
-  protocol = "tcp"
+  protocol = 'tcp'
   internal_port = 8080
 
   [[services.ports]]
     port = 80
-    handlers = ["http"]
+    handlers = ['http']
 
   [[services.ports]]
     port = 443
-    handlers = ["tls", "http"]
+    handlers = ['tls', 'http']
 
-
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

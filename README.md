@@ -27,19 +27,23 @@ Then open http://localhost:3000 → You will be redirected to a unique room URL 
 Share locally: LAN URLs appear in the header.
 
 ## Public deploy (free)
+
 ### Fly.io
-1) Install CLI: https://fly.io/docs/hands-on/install-flyctl/
-2) Login: `fly auth login`
-3) Launch & deploy: `fly launch --now` (accept defaults; app name must be globally unique)
-4) Open: `fly open`
+
+1. Install CLI: https://fly.io/docs/hands-on/install-flyctl/
+2. Login: `fly auth login`
+3. Launch & deploy: `fly launch --now` (accept defaults; app name must be globally unique)
+4. Open: `fly open`
 
 The server sets `PORT` to 8080 inside the container; Fly maps it to 443/80 automatically.
 
 ### Docker (optional)
+
 ```bash
 docker build -t sync-audio-hub .
 docker run -p 8080:8080 sync-audio-hub
 ```
+
 Open http://localhost:8080
 
 ## ngrok (optional, for local public link)
